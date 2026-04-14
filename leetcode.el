@@ -623,12 +623,20 @@ of QUERY-NAME."
 
 (defun leetcode--save-problems-cache ()
   "Save all problems and tags to `leetcode-cache-file'."
+  (setq leetcode-cache-file (expand-file-name leetcode-cache-file))
+  (let ((cache-dir (file-name-directory leetcode-cache-file)))
+    (when (and cache-dir (not (file-directory-p cache-dir)))
+      (make-directory cache-dir t)))
   (with-temp-file leetcode-cache-file
     (prin1 `((problems  . ,(leetcode-problems-problems leetcode--problems))
              (tags      . ,leetcode--all-tags)
              (timestamp . ,(float-time)))
            (current-buffer)))
-  (message "LeetCode: saved %d problems to cache." (leetcode-problems-num leetcode--problems)))
+  (unless (file-exists-p leetcode-cache-file)
+    (user-error "LeetCode: cache write did not produce %s" leetcode-cache-file))
+  (message "LeetCode: saved %d problems to cache: %s"
+           (leetcode-problems-num leetcode--problems)
+           leetcode-cache-file))
 
 (defun leetcode--load-problems-cache ()
   "Load problems from `leetcode-cache-file'. Returns t on success."
@@ -959,10 +967,11 @@ row."
       (tabulated-list-init-header)
       (tabulated-list-print t))))
 
-;;;###autoload(autoload 'leetcode-fetch-all-problems "leetcode" nil t)
+;;;###autoload
 (aio-defun leetcode-fetch-all-problems ()
   "Fetch every LeetCode problem and save to `leetcode-cache-file'."
   (interactive)
+  (aio-await (leetcode--ensure-login))
   (setf (leetcode-problems-problems leetcode--problems) nil
         (leetcode-problems-num      leetcode--problems) 0
         (leetcode-problems-has-more leetcode--problems) t)
@@ -970,14 +979,21 @@ row."
   (while (leetcode-problems-has-more leetcode--problems)
     (let ((skip (leetcode-problems-num leetcode--problems)))
       (message "LeetCode: fetching problems %d-%d..." skip (+ skip 99))
-      (aio-await (leetcode--fetch-question-list "all-code-essentials"
-                                                skip 100
-                                                '((filterCombineType . "ALL"))
-                                                ""
-                                                '((sortField . "CUSTOM")
-                                                  (sortOrder . "ASCENDING"))))))
+      (unless (aio-await (leetcode--fetch-question-list "all-code-essentials"
+                                                        skip 100
+                                                        '((filterCombineType . "ALL"))
+                                                        ""
+                                                        '((sortField . "CUSTOM")
+                                                          (sortOrder . "ASCENDING"))))
+        (user-error "LeetCode: fetch failed while loading problems %d-%d" skip (+ skip 99)))
+      (when (= (leetcode-problems-num leetcode--problems) skip)
+        (user-error "LeetCode: pagination made no progress at offset %d" skip))
+      ;; Persist progress as we go so an interruption or later UI refresh
+      ;; cannot discard a successful multi-page fetch.
+      (leetcode--save-problems-cache)))
   (leetcode--save-problems-cache)
   (setq leetcode--display-tags leetcode-prefer-tag-display)
+  (message "LeetCode: fetched %d problems." (leetcode-problems-num leetcode--problems))
   (leetcode-reset-filter-and-refresh))
 
 (aio-defun leetcode-refresh-fetch ()
@@ -1006,7 +1022,7 @@ row."
     (aio-await (leetcode--login)) ; It's weird that somehow we have to login twice to be real login...
     (aio-await (leetcode--login))))
 
-;;;###autoload(autoload 'leetcode "leetcode" nil t)
+;;;###autoload
 (aio-defun leetcode ()
   "Start Leetcode."
   (interactive)
@@ -1018,7 +1034,7 @@ row."
       (switch-to-buffer leetcode--buffer-name))
     (leetcode--maybe-focus)))
 
-;;;###autoload(autoload 'leetcode-daily "leetcode" nil t)
+;;;###autoload
 (aio-defun leetcode-daily ()
   "Open the daily challenge."
   (interactive)
