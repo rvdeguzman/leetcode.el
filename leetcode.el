@@ -138,6 +138,12 @@ mysql, mssql, oraclesql."
   :group 'leetcode
   :type 'directory)
 
+(defcustom leetcode-cache-file
+  (file-name-concat user-emacs-directory "leetcode-problems.cache")
+  "File to persist all LeetCode problems between sessions."
+  :group 'leetcode
+  :type 'file)
+
 (cl-defstruct leetcode-user
   "A LeetCode User.
 The object with following attributes:
@@ -615,6 +621,34 @@ of QUERY-NAME."
     ;; problem tags
     (delete-dups leetcode--all-tags)))
 
+(defun leetcode--save-problems-cache ()
+  "Save all problems and tags to `leetcode-cache-file'."
+  (with-temp-file leetcode-cache-file
+    (prin1 `((problems  . ,(leetcode-problems-problems leetcode--problems))
+             (tags      . ,leetcode--all-tags)
+             (timestamp . ,(float-time)))
+           (current-buffer)))
+  (message "LeetCode: saved %d problems to cache." (leetcode-problems-num leetcode--problems)))
+
+(defun leetcode--load-problems-cache ()
+  "Load problems from `leetcode-cache-file'. Returns t on success."
+  (when (file-exists-p leetcode-cache-file)
+    (condition-case err
+        (let* ((cache (with-temp-buffer
+                        (insert-file-contents leetcode-cache-file)
+                        (read (current-buffer))))
+               (problems (alist-get 'problems cache))
+               (tags     (alist-get 'tags cache)))
+          (setf (leetcode-problems-problems leetcode--problems) problems
+                (leetcode-problems-num      leetcode--problems) (length problems)
+                (leetcode-problems-has-more leetcode--problems) nil
+                (leetcode-problems-tag      leetcode--problems) "all")
+          (setq leetcode--all-tags tags)
+          t)
+      (error
+       (message "LeetCode: failed to load cache: %s" err)
+       nil))))
+
 (leetcode--define-graphql question-content (title-slug)
   (let ((problem (leetcode--get-problem title-slug)))
     (if problem
@@ -925,22 +959,47 @@ row."
       (tabulated-list-init-header)
       (tabulated-list-print t))))
 
-(aio-defun leetcode-refresh-fetch ()
-  "Refresh problems and update `tabulated-list-entries'."
+;;;###autoload(autoload 'leetcode-fetch-all-problems "leetcode" nil t)
+(aio-defun leetcode-fetch-all-problems ()
+  "Fetch every LeetCode problem and save to `leetcode-cache-file'."
   (interactive)
-  (message "LeetCode refreshing question list...")
   (setf (leetcode-problems-problems leetcode--problems) nil
-        (leetcode-problems-num leetcode--problems) 0
+        (leetcode-problems-num      leetcode--problems) 0
         (leetcode-problems-has-more leetcode--problems) t)
-  ;; max page limit is 100
-  (aio-await (leetcode--fetch-question-list "all-code-essentials"
-                                            0 100
-                                            '((filterCombineType . "ALL"))
-                                            ""
-                                            '((sortField . "CUSTOM")
-                                              (sortOrder . "ASCENDING")))) ; TODO pagination?
+  (setq leetcode--all-tags nil)
+  (while (leetcode-problems-has-more leetcode--problems)
+    (let ((skip (leetcode-problems-num leetcode--problems)))
+      (message "LeetCode: fetching problems %d-%d..." skip (+ skip 99))
+      (aio-await (leetcode--fetch-question-list "all-code-essentials"
+                                                skip 100
+                                                '((filterCombineType . "ALL"))
+                                                ""
+                                                '((sortField . "CUSTOM")
+                                                  (sortOrder . "ASCENDING"))))))
+  (leetcode--save-problems-cache)
   (setq leetcode--display-tags leetcode-prefer-tag-display)
   (leetcode-reset-filter-and-refresh))
+
+(aio-defun leetcode-refresh-fetch ()
+  "Load problems from cache if available, otherwise fetch first page from API."
+  (interactive)
+  (if (leetcode--load-problems-cache)
+      (progn
+        (message "LeetCode: loaded %d problems from cache." (leetcode-problems-num leetcode--problems))
+        (setq leetcode--display-tags leetcode-prefer-tag-display)
+        (leetcode-reset-filter-and-refresh))
+    (message "LeetCode refreshing question list...")
+    (setf (leetcode-problems-problems leetcode--problems) nil
+          (leetcode-problems-num      leetcode--problems) 0
+          (leetcode-problems-has-more leetcode--problems) t)
+    (aio-await (leetcode--fetch-question-list "all-code-essentials"
+                                              0 100
+                                              '((filterCombineType . "ALL"))
+                                              ""
+                                              '((sortField . "CUSTOM")
+                                                (sortOrder . "ASCENDING"))))
+    (setq leetcode--display-tags leetcode-prefer-tag-display)
+    (leetcode-reset-filter-and-refresh)))
 
 (aio-defun leetcode--ensure-login (&optional force)
   (when (or force (not (leetcode--login-p)))
@@ -1500,6 +1559,7 @@ It will restore the layout based on current buffer's name."
       (define-key map "d" #'leetcode-set-filter-difficulty)
       (define-key map "g" #'leetcode-refresh)
       (define-key map "G" #'leetcode-refresh-fetch)
+      (define-key map "f" #'leetcode-fetch-all-problems)
       (define-key map "r" #'leetcode-reset-filter-and-refresh)
       (define-key map "q" #'quit-window)))
   "Keymap for `leetcode--problems-mode'.")
